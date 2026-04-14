@@ -24,6 +24,7 @@ load_dotenv()
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "fedecoach@2024")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -632,7 +633,7 @@ async def verify_webhook(req: Request):
     mode      = params.get("hub.mode")
     token     = params.get("hub.verify_token")
     challenge = params.get("hub.challenge")
-    verify_token = os.getenv("VERIFY_TOKEN", "mbeya_sacco_token")
+    verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN","fedecoach@2024")
     if mode == "subscribe" and token == verify_token:
         return int(challenge)
     return {"error": "Verification failed"}
