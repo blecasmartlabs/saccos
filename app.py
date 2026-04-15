@@ -5,9 +5,11 @@ MBEYA SACCO WHATSAPP BOT
 - Goodbye messages are warm, SACCO-branded, no buttons returned
 - Clean text only (no *, no markdown)
 - Safe buttons (<=20 chars)
+- AI thoughts/reasoning stripped from responses
 """
 
 import os
+import re
 import logging
 import json
 import random
@@ -102,7 +104,7 @@ def is_goodbye(text: str) -> bool:
 async def detect_language_ai(text: str) -> str:
     try:
         loop = __import__('asyncio').get_event_loop()
-        
+
         def call_api():
             res = client.models.generate_content(
                 model="gemini-2.5-flash",
@@ -113,7 +115,7 @@ async def detect_language_ai(text: str) -> str:
                 ),
             )
             return res.text
-        
+
         detected = await loop.run_in_executor(executor, call_api)
         detected = detected.strip().lower()
         return "sw" if "sw" in detected else "en"
@@ -130,6 +132,26 @@ def clean_text(text, max_len=1000):
     for ch in ["*", "_", "`", "#"]:
         text = text.replace(ch, "")
     return text.strip()[:max_len]
+
+# ─────────────────────────────
+# STRIP AI THOUGHTS / REASONING
+# ─────────────────────────────
+def strip_thoughts(text: str) -> str:
+    """Remove any leaked reasoning blocks from the AI response."""
+    if not text:
+        return ""
+    # Remove <think>...</think> or <thinking>...</thinking> tags
+    text = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove THOUGHTS: ... or THOUGHT: ... blocks (up to the next all-caps section or end)
+    text = re.sub(r'THOUGHTS?:.*?(?=\n[A-Z]|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove common reasoning lead-in lines
+    text = re.sub(
+        r'^(My |I need to|Let me|Okay,|Alright,|Sure,|Of course,|The user|Looking at).*\n?',
+        '',
+        text,
+        flags=re.MULTILINE | re.IGNORECASE
+    )
+    return text.strip()
 
 # ─────────────────────────────
 # STATIC CONTENT
@@ -511,6 +533,8 @@ SYSTEM_PROMPT_SW = (
     "Wewe ni msaidizi wa MBEYA SACCO kwenye WhatsApp. "
     "Jibu kwa Kiswahili tu. Majibu mafupi na wazi. "
     "Hakuna markdown, hakuna *, hakuna alama za ziada. "
+    "Hakuna mawazo, hakuna maelezo ya ndani, hakuna THOUGHTS, hakuna sababu. "
+    "Toa JIBU TU moja kwa moja bila utangulizi wowote. "
     "Huduma: Akiba (TZS 10,000), Mikopo (TZS 50,000-5,000,000), Uwekezaji. "
     "Kama swali halikuhusiani na SACCO jibu: "
     "Samahani, ninatoa taarifa za MBEYA SACCO tu."
@@ -520,6 +544,8 @@ SYSTEM_PROMPT_EN = (
     "You are a MBEYA SACCO WhatsApp assistant. "
     "Reply in English only. Keep replies short and clear. "
     "No markdown, no *, no symbols. "
+    "No thoughts, no reasoning, no THOUGHTS blocks, no preamble of any kind. "
+    "Output ONLY the final answer directly, nothing else. "
     "Services: Savings (from TZS 10,000), Loans (TZS 50,000-5,000,000), Investments. "
     "If unrelated to SACCO reply: "
     "Sorry, I only provide information about MBEYA SACCO services."
@@ -530,7 +556,7 @@ async def ask_ai(user, msg):
     system = SYSTEM_PROMPT_SW if lang == "sw" else SYSTEM_PROMPT_EN
     try:
         loop = __import__('asyncio').get_event_loop()
-        
+
         def call_api():
             res = client.models.generate_content(
                 model="gemini-2.5-flash",
@@ -538,9 +564,9 @@ async def ask_ai(user, msg):
                 config={"system_instruction": system}
             )
             return res.text
-        
+
         result = await loop.run_in_executor(executor, call_api)
-        return clean_text(result)
+        return clean_text(strip_thoughts(result))
     except Exception as e:
         logging.error(f"AI error: {type(e).__name__}: {e}")
         return (
@@ -562,8 +588,8 @@ async def webhook(req: Request):
             msg = body["entry"][0]["changes"][0]["value"]["messages"][0]
         except (KeyError, IndexError, TypeError) as e:
             logging.debug(f"Webhook structure error: {e}, body: {body}")
-            return {"status": "ok"}  # Return ok to prevent retry
-        
+            return {"status": "ok"}
+
         sender = msg.get("from")
         if not sender:
             logging.warning(f"No sender in message: {msg}")
@@ -657,7 +683,7 @@ async def verify_webhook(req: Request):
     mode      = params.get("hub.mode")
     token     = params.get("hub.verify_token")
     challenge = params.get("hub.challenge")
-    verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN","fedecoach2024")
+    verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN", "fedecoach2024")
     if mode == "subscribe" and token == verify_token:
         return int(challenge)
     return {"error": "Verification failed"}
@@ -668,14 +694,14 @@ async def health_check():
     """Test Gemini API connectivity"""
     try:
         loop = __import__('asyncio').get_event_loop()
-        
+
         def call_api():
             res = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents="Say 'OK' only"
             )
             return res.text
-        
+
         result = await loop.run_in_executor(executor, call_api)
         return {
             "status": "ok",
