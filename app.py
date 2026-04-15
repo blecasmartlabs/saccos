@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request
 from dotenv import load_dotenv
 from google import genai
 import httpx
+from concurrent.futures import ThreadPoolExecutor
 
 # ─────────────────────────────
 # ENV
@@ -27,6 +28,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "fedecoach@2024")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
+executor = ThreadPoolExecutor(max_workers=5)
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -99,17 +101,22 @@ def is_goodbye(text: str) -> bool:
 
 async def detect_language_ai(text: str) -> str:
     try:
-        res = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=(
-                "Is this message in Swahili or English? "
-                "Reply with ONLY one word: 'sw' or 'en'. "
-                f"Message: {text}"
-            ),
+        loop = __import__('asyncio').get_event_loop()
+        res = await loop.run_in_executor(
+            executor,
+            lambda: client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=(
+                    "Is this message in Swahili or English? "
+                    "Reply with ONLY one word: 'sw' or 'en'. "
+                    f"Message: {text}"
+                ),
+            )
         )
         detected = res.text.strip().lower()
         return "sw" if "sw" in detected else "en"
-    except:
+    except Exception as e:
+        logging.warning(f"Language detection AI failed: {e}")
         return "en"
 
 # ─────────────────────────────
@@ -520,14 +527,18 @@ async def ask_ai(user, msg):
     lang = get_lang(user)
     system = SYSTEM_PROMPT_SW if lang == "sw" else SYSTEM_PROMPT_EN
     try:
-        res = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=msg,
-            config={"system_instruction": system}
+        loop = __import__('asyncio').get_event_loop()
+        res = await loop.run_in_executor(
+            executor,
+            lambda: client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=msg,
+                config={"system_instruction": system}
+            )
         )
         return clean_text(res.text)
     except Exception as e:
-        logging.error(f"AI error: {e}")
+        logging.error(f"AI error: {type(e).__name__}: {e}")
         return (
             "Tafadhali jaribu tena baadaye."
             if lang == "sw"
@@ -642,3 +653,29 @@ async def verify_webhook(req: Request):
 @app.get("/")
 def home():
     return {"status": "MBEYA SACCO BOT RUNNING"}
+
+
+@app.get("/api/health")
+async def health_check():
+    """Test Gemini API connectivity"""
+    try:
+        loop = __import__('asyncio').get_event_loop()
+        res = await loop.run_in_executor(
+            executor,
+            lambda: client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents="Say 'OK' only"
+            )
+        )
+        return {
+            "status": "ok",
+            "gemini_api": "working",
+            "response": res.text.strip()
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "gemini_api": "failed",
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
