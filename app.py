@@ -102,9 +102,9 @@ def is_goodbye(text: str) -> bool:
 async def detect_language_ai(text: str) -> str:
     try:
         loop = __import__('asyncio').get_event_loop()
-        res = await loop.run_in_executor(
-            executor,
-            lambda: client.models.generate_content(
+        
+        def call_api():
+            res = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=(
                     "Is this message in Swahili or English? "
@@ -112,11 +112,13 @@ async def detect_language_ai(text: str) -> str:
                     f"Message: {text}"
                 ),
             )
-        )
-        detected = res.text.strip().lower()
+            return res.text
+        
+        detected = await loop.run_in_executor(executor, call_api)
+        detected = detected.strip().lower()
         return "sw" if "sw" in detected else "en"
     except Exception as e:
-        logging.warning(f"Language detection AI failed: {e}")
+        logging.warning(f"Language detection AI failed: {type(e).__name__}: {e}")
         return "en"
 
 # ─────────────────────────────
@@ -528,15 +530,17 @@ async def ask_ai(user, msg):
     system = SYSTEM_PROMPT_SW if lang == "sw" else SYSTEM_PROMPT_EN
     try:
         loop = __import__('asyncio').get_event_loop()
-        res = await loop.run_in_executor(
-            executor,
-            lambda: client.models.generate_content(
+        
+        def call_api():
+            res = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=msg,
                 config={"system_instruction": system}
             )
-        )
-        return clean_text(res.text)
+            return res.text
+        
+        result = await loop.run_in_executor(executor, call_api)
+        return clean_text(result)
     except Exception as e:
         logging.error(f"AI error: {type(e).__name__}: {e}")
         return (
@@ -660,17 +664,19 @@ async def health_check():
     """Test Gemini API connectivity"""
     try:
         loop = __import__('asyncio').get_event_loop()
-        res = await loop.run_in_executor(
-            executor,
-            lambda: client.models.generate_content(
+        
+        def call_api():
+            res = client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents="Say 'OK' only"
             )
-        )
+            return res.text
+        
+        result = await loop.run_in_executor(executor, call_api)
         return {
             "status": "ok",
             "gemini_api": "working",
-            "response": res.text.strip()
+            "response": result.strip()
         }
     except Exception as e:
         return {
