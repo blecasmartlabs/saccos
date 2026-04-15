@@ -633,7 +633,7 @@ async def verify_webhook(req: Request):
     mode      = params.get("hub.mode")
     token     = params.get("hub.verify_token")
     challenge = params.get("hub.challenge")
-    verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN","fedecoach@2024")
+    verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN")
     if mode == "subscribe" and token == verify_token:
         return int(challenge)
     return {"error": "Verification failed"}
