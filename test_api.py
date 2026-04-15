@@ -11,7 +11,7 @@ async def test_health():
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             print("Testing Gemini API via /api/health...")
-            response = await client.get("http://localhost:8000/api/health")
+            response = await client.get("http://localhost:8001/api/health")
             print(f"Status Code: {response.status_code}")
             print(f"Response:\n{response.json()}")
             

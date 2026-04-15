@@ -25,7 +25,7 @@ load_dotenv()
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "fedecoach@2024")
+VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "fedecoach2024")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 executor = ThreadPoolExecutor(max_workers=5)
@@ -557,8 +557,17 @@ async def webhook(req: Request):
     body = await req.json()
 
     try:
-        msg = body["entry"][0]["changes"][0]["value"]["messages"][0]
-        sender = msg["from"]
+        # Handle malformed webhook data
+        try:
+            msg = body["entry"][0]["changes"][0]["value"]["messages"][0]
+        except (KeyError, IndexError, TypeError) as e:
+            logging.debug(f"Webhook structure error: {e}, body: {body}")
+            return {"status": "ok"}  # Return ok to prevent retry
+        
+        sender = msg.get("from")
+        if not sender:
+            logging.warning(f"No sender in message: {msg}")
+            return {"status": "ok"}
 
         if msg.get("type") == "interactive":
             text = msg["interactive"]["button_reply"]["id"]
@@ -638,8 +647,8 @@ async def webhook(req: Request):
         return {"status": "ok"}
 
     except Exception as e:
-        logging.error(f"Webhook error: {e}")
-        return {"error": str(e)}
+        logging.error(f"Webhook error: {type(e).__name__}: {e}", exc_info=True)
+        return {"status": "ok"}
 
 
 @app.get("/api/webhook")
@@ -648,15 +657,10 @@ async def verify_webhook(req: Request):
     mode      = params.get("hub.mode")
     token     = params.get("hub.verify_token")
     challenge = params.get("hub.challenge")
-    verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN")
+    verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN","fedecoach2024")
     if mode == "subscribe" and token == verify_token:
         return int(challenge)
     return {"error": "Verification failed"}
-
-
-@app.get("/")
-def home():
-    return {"status": "MBEYA SACCO BOT RUNNING"}
 
 
 @app.get("/api/health")
@@ -685,3 +689,8 @@ async def health_check():
             "error": str(e),
             "error_type": type(e).__name__
         }
+
+
+@app.get("/")
+def home():
+    return {"status": "MBEYA SACCO BOT RUNNING"}

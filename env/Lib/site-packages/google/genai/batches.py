@@ -31,7 +31,6 @@ from ._common import move_value_by_path as movev
 from ._common import set_value_by_path as setv
 from .pagers import AsyncPager, Pager
 
-
 logger = logging.getLogger('google_genai.batches')
 
 
@@ -527,6 +526,13 @@ def _CreateBatchJobConfig_to_mldev(
   if getv(from_object, ['dest']) is not None:
     raise ValueError('dest parameter is not supported in Gemini API.')
 
+  if getv(from_object, ['webhook_config']) is not None:
+    setv(
+        parent_object,
+        ['batch', 'webhookConfig'],
+        getv(from_object, ['webhook_config']),
+    )
+
   return to_object
 
 
@@ -547,6 +553,9 @@ def _CreateBatchJobConfig_to_vertex(
             t.t_batch_job_destination(getv(from_object, ['dest'])), to_object
         ),
     )
+
+  if getv(from_object, ['webhook_config']) is not None:
+    raise ValueError('webhook_config parameter is not supported in Vertex AI.')
 
   return to_object
 
@@ -788,6 +797,14 @@ def _EmbedContentConfig_to_mldev(
 
   if getv(from_object, ['auto_truncate']) is not None:
     raise ValueError('auto_truncate parameter is not supported in Gemini API.')
+
+  if getv(from_object, ['document_ocr']) is not None:
+    raise ValueError('document_ocr parameter is not supported in Gemini API.')
+
+  if getv(from_object, ['audio_track_extraction']) is not None:
+    raise ValueError(
+        'audio_track_extraction parameter is not supported in Gemini API.'
+    )
 
   return to_object
 
@@ -1650,7 +1667,22 @@ class Batches(_api_module.BaseModule):
       response_dict = _BatchJob_from_mldev(response_dict)
 
     return_value = types.BatchJob._from_response(
-        response=response_dict, kwargs=parameter_model.model_dump()
+        response=response_dict,
+        kwargs={
+            'config': {
+                'response_schema': getattr(
+                    parameter_model.config, 'response_schema', None
+                ),
+                'response_json_schema': getattr(
+                    parameter_model.config, 'response_json_schema', None
+                ),
+                'include_all_fields': getattr(
+                    parameter_model.config, 'include_all_fields', None
+                ),
+            }
+        }
+        if getattr(parameter_model, 'config', None)
+        else {},
     )
 
     self._api_client._verify_response(return_value)
@@ -1710,7 +1742,22 @@ class Batches(_api_module.BaseModule):
       response_dict = _BatchJob_from_mldev(response_dict)
 
     return_value = types.BatchJob._from_response(
-        response=response_dict, kwargs=parameter_model.model_dump()
+        response=response_dict,
+        kwargs={
+            'config': {
+                'response_schema': getattr(
+                    parameter_model.config, 'response_schema', None
+                ),
+                'response_json_schema': getattr(
+                    parameter_model.config, 'response_json_schema', None
+                ),
+                'include_all_fields': getattr(
+                    parameter_model.config, 'include_all_fields', None
+                ),
+            }
+        }
+        if getattr(parameter_model, 'config', None)
+        else {},
     )
 
     self._api_client._verify_response(return_value)
@@ -1790,7 +1837,22 @@ class Batches(_api_module.BaseModule):
       response_dict = _BatchJob_from_mldev(response_dict)
 
     return_value = types.BatchJob._from_response(
-        response=response_dict, kwargs=parameter_model.model_dump()
+        response=response_dict,
+        kwargs={
+            'config': {
+                'response_schema': getattr(
+                    parameter_model.config, 'response_schema', None
+                ),
+                'response_json_schema': getattr(
+                    parameter_model.config, 'response_json_schema', None
+                ),
+                'include_all_fields': getattr(
+                    parameter_model.config, 'include_all_fields', None
+                ),
+            }
+        }
+        if getattr(parameter_model, 'config', None)
+        else {},
     )
 
     self._api_client._verify_response(return_value)
@@ -1860,9 +1922,7 @@ class Batches(_api_module.BaseModule):
     request_dict = _common.convert_to_dict(request_dict)
     request_dict = _common.encode_unserializable_types(request_dict)
 
-    response = self._api_client.request(
-        'post', path, request_dict, http_options
-    )
+    self._api_client.request('post', path, request_dict, http_options)
 
   def _list(
       self, *, config: Optional[types.ListBatchJobsConfigOrDict] = None
@@ -1914,7 +1974,22 @@ class Batches(_api_module.BaseModule):
       response_dict = _ListBatchJobsResponse_from_mldev(response_dict)
 
     return_value = types.ListBatchJobsResponse._from_response(
-        response=response_dict, kwargs=parameter_model.model_dump()
+        response=response_dict,
+        kwargs={
+            'config': {
+                'response_schema': getattr(
+                    parameter_model.config, 'response_schema', None
+                ),
+                'response_json_schema': getattr(
+                    parameter_model.config, 'response_json_schema', None
+                ),
+                'include_all_fields': getattr(
+                    parameter_model.config, 'include_all_fields', None
+                ),
+            }
+        }
+        if getattr(parameter_model, 'config', None)
+        else {},
     )
     return_value.sdk_http_response = types.HttpResponse(
         headers=response.headers
@@ -1999,7 +2074,22 @@ class Batches(_api_module.BaseModule):
       response_dict = _DeleteResourceJob_from_mldev(response_dict)
 
     return_value = types.DeleteResourceJob._from_response(
-        response=response_dict, kwargs=parameter_model.model_dump()
+        response=response_dict,
+        kwargs={
+            'config': {
+                'response_schema': getattr(
+                    parameter_model.config, 'response_schema', None
+                ),
+                'response_json_schema': getattr(
+                    parameter_model.config, 'response_json_schema', None
+                ),
+                'include_all_fields': getattr(
+                    parameter_model.config, 'include_all_fields', None
+                ),
+            }
+        }
+        if getattr(parameter_model, 'config', None)
+        else {},
     )
     return_value.sdk_http_response = types.HttpResponse(
         headers=response.headers
@@ -2195,7 +2285,22 @@ class AsyncBatches(_api_module.BaseModule):
       response_dict = _BatchJob_from_mldev(response_dict)
 
     return_value = types.BatchJob._from_response(
-        response=response_dict, kwargs=parameter_model.model_dump()
+        response=response_dict,
+        kwargs={
+            'config': {
+                'response_schema': getattr(
+                    parameter_model.config, 'response_schema', None
+                ),
+                'response_json_schema': getattr(
+                    parameter_model.config, 'response_json_schema', None
+                ),
+                'include_all_fields': getattr(
+                    parameter_model.config, 'include_all_fields', None
+                ),
+            }
+        }
+        if getattr(parameter_model, 'config', None)
+        else {},
     )
 
     self._api_client._verify_response(return_value)
@@ -2255,7 +2360,22 @@ class AsyncBatches(_api_module.BaseModule):
       response_dict = _BatchJob_from_mldev(response_dict)
 
     return_value = types.BatchJob._from_response(
-        response=response_dict, kwargs=parameter_model.model_dump()
+        response=response_dict,
+        kwargs={
+            'config': {
+                'response_schema': getattr(
+                    parameter_model.config, 'response_schema', None
+                ),
+                'response_json_schema': getattr(
+                    parameter_model.config, 'response_json_schema', None
+                ),
+                'include_all_fields': getattr(
+                    parameter_model.config, 'include_all_fields', None
+                ),
+            }
+        }
+        if getattr(parameter_model, 'config', None)
+        else {},
     )
 
     self._api_client._verify_response(return_value)
@@ -2337,7 +2457,22 @@ class AsyncBatches(_api_module.BaseModule):
       response_dict = _BatchJob_from_mldev(response_dict)
 
     return_value = types.BatchJob._from_response(
-        response=response_dict, kwargs=parameter_model.model_dump()
+        response=response_dict,
+        kwargs={
+            'config': {
+                'response_schema': getattr(
+                    parameter_model.config, 'response_schema', None
+                ),
+                'response_json_schema': getattr(
+                    parameter_model.config, 'response_json_schema', None
+                ),
+                'include_all_fields': getattr(
+                    parameter_model.config, 'include_all_fields', None
+                ),
+            }
+        }
+        if getattr(parameter_model, 'config', None)
+        else {},
     )
 
     self._api_client._verify_response(return_value)
@@ -2407,7 +2542,7 @@ class AsyncBatches(_api_module.BaseModule):
     request_dict = _common.convert_to_dict(request_dict)
     request_dict = _common.encode_unserializable_types(request_dict)
 
-    response = await self._api_client.async_request(
+    await self._api_client.async_request(
         'post', path, request_dict, http_options
     )
 
@@ -2463,7 +2598,22 @@ class AsyncBatches(_api_module.BaseModule):
       response_dict = _ListBatchJobsResponse_from_mldev(response_dict)
 
     return_value = types.ListBatchJobsResponse._from_response(
-        response=response_dict, kwargs=parameter_model.model_dump()
+        response=response_dict,
+        kwargs={
+            'config': {
+                'response_schema': getattr(
+                    parameter_model.config, 'response_schema', None
+                ),
+                'response_json_schema': getattr(
+                    parameter_model.config, 'response_json_schema', None
+                ),
+                'include_all_fields': getattr(
+                    parameter_model.config, 'include_all_fields', None
+                ),
+            }
+        }
+        if getattr(parameter_model, 'config', None)
+        else {},
     )
     return_value.sdk_http_response = types.HttpResponse(
         headers=response.headers
@@ -2548,7 +2698,22 @@ class AsyncBatches(_api_module.BaseModule):
       response_dict = _DeleteResourceJob_from_mldev(response_dict)
 
     return_value = types.DeleteResourceJob._from_response(
-        response=response_dict, kwargs=parameter_model.model_dump()
+        response=response_dict,
+        kwargs={
+            'config': {
+                'response_schema': getattr(
+                    parameter_model.config, 'response_schema', None
+                ),
+                'response_json_schema': getattr(
+                    parameter_model.config, 'response_json_schema', None
+                ),
+                'include_all_fields': getattr(
+                    parameter_model.config, 'include_all_fields', None
+                ),
+            }
+        }
+        if getattr(parameter_model, 'config', None)
+        else {},
     )
     return_value.sdk_http_response = types.HttpResponse(
         headers=response.headers
