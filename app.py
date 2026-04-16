@@ -52,7 +52,6 @@ DEDUP_TTL = 600  # seconds (10 minutes)
 
 def is_duplicate(msg_id: str) -> bool:
     now = time.time()
-    # Expire old entries
     expired = [k for k, ts in PROCESSED_IDS.items() if now - ts > DEDUP_TTL]
     for k in expired:
         del PROCESSED_IDS[k]
@@ -606,44 +605,41 @@ async def process_message(sender: str, text: str, is_button: bool):
         set_state(sender, "start")
         return
 
-    # ── Routing — every branch sends EXACTLY ONE message ────────────
+    # ── START state: show main menu then stop ────────────────────────
     if state == "start":
         await main_menu(sender)
+        return  # ← CRITICAL FIX: without this, execution falls through
+                #   to the elifs below and hits the AI fallback instead
 
-    elif text == "services":
-        await services_menu(sender)
-
-    elif text == "help":
-        await help_menu(sender)
-
-    elif text == "contact":
-        await contact_menu(sender)
-
-    elif text == "savings":
-        await send_text(sender, get_content(sender, "savings"))
-
-    elif text == "loans":
-        await send_text(sender, get_content(sender, "loans"))
-
-    elif text == "invest":
-        await send_text(sender, get_content(sender, "invest"))
-
-    elif text == "faqs":
-        await send_text(sender, get_content(sender, "faqs"))
-
-    elif text == "tips":
-        await send_text(sender, get_content(sender, "tips"))
-
-    elif text == "send_msg":
-        set_state(sender, "contact_input")
-        await send_text(sender, get_content(sender, "write_msg"))
-
-    elif state == "contact_input":
+    # ── Contact input: user is typing a free-text message ────────────
+    if state == "contact_input" and not is_button:
         logging.info(f"ADMIN MSG from {sender}: {text}")
         await send_text(sender, get_content(sender, "msg_received"))
         set_state(sender, "main")
+        return
 
+    # ── Button / menu routing (works from ANY state) ─────────────────
+    if text == "services":
+        await services_menu(sender)
+    elif text == "help":
+        await help_menu(sender)
+    elif text == "contact":
+        await contact_menu(sender)
+    elif text == "savings":
+        await send_text(sender, get_content(sender, "savings"))
+    elif text == "loans":
+        await send_text(sender, get_content(sender, "loans"))
+    elif text == "invest":
+        await send_text(sender, get_content(sender, "invest"))
+    elif text == "faqs":
+        await send_text(sender, get_content(sender, "faqs"))
+    elif text == "tips":
+        await send_text(sender, get_content(sender, "tips"))
+    elif text == "send_msg":
+        set_state(sender, "contact_input")
+        await send_text(sender, get_content(sender, "write_msg"))
     else:
+        # Free text question → AI fallback
         reply = await ask_ai(sender, text)
         await send_text(sender, reply)
 
