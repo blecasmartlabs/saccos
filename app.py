@@ -118,27 +118,30 @@ def is_goodbye(text: str) -> bool:
     return False
 
 # ─────────────────────────────
-# SACCOS DEFINITION DETECTION
+# SACCO DEFINITION DETECTION
 # ─────────────────────────────
-SACCOS_KEYWORDS_SW = [
+# FIX: Variable names were inconsistent (SACCOS_ prefix vs SACCO_ prefix).
+# Standardised to SACCO_KEYWORDS_SW and SACCO_KEYWORDS_EN throughout.
+SACCO_KEYWORDS_SW = [
     "sacco", "nini sacco", "sacco ni nini", "je sacco", "SACCO",
     "savings and credit", "akiba na mikopo", "kooperetiva", "cooperative",
     "cumulative savings", "habari kuhusu sacco", "somo la sacco",
-    "SACCOS ni nini", "SACCOS"
+    "SACCOS ni nini", "SACCOS",
 ]
-SACCOS_KEYWORDS_EN = [
+SACCO_KEYWORDS_EN = [
     "what is sacco", "what is saccos", "sacco definition", "saccos definition",
     "tell me about sacco", "tell me about saccos", "SACCO", "SACCOS",
     "savings and credit", "explain sacco", "sacco meaning", "saccos meaning",
-    "cooperative society", "cooperative"
+    "cooperative society", "cooperative",
 ]
 
 def is_sacco_definition_question(text: str, lang: str) -> bool:
-    """Check if user is asking about what SACCO/SACCOS is"""
+    """Check if user is asking about what SACCO/SACCOS is."""
     lower = text.lower().strip()
+    # FIX: now correctly references SACCO_KEYWORDS_SW / SACCO_KEYWORDS_EN
     keywords = SACCO_KEYWORDS_SW if lang == "sw" else SACCO_KEYWORDS_EN
     for keyword in keywords:
-        if keyword in lower:
+        if keyword.lower() in lower:
             return True
     return False
 
@@ -654,8 +657,7 @@ async def process_message(sender: str, text: str, is_button: bool):
     # ── START state: show main menu then stop ────────────────────────
     if state == "start":
         await main_menu(sender)
-        return  # ← CRITICAL FIX: without this, execution falls through
-                #   to the elifs below and hits the AI fallback instead
+        return
 
     # ── Contact input: user is typing a free-text message ────────────
     if state == "contact_input" and not is_button:
@@ -664,8 +666,8 @@ async def process_message(sender: str, text: str, is_button: bool):
         set_state(sender, "main")
         return
 
-    # ── SACCO Definition Question → AI with special system prompt ───────
-    if is_sacco_definition_question(text, get_lang(sender)):
+    # ── SACCO Definition Question → AI with special system prompt ────
+    if not is_button and is_sacco_definition_question(text, get_lang(sender)):
         reply = await ask_ai(sender, text, is_sacco_edu=True)
         await send_text(sender, reply)
         return
