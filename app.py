@@ -6,13 +6,17 @@ MBEYA SACCO WHATSAPP BOT
 - Clean text only (no *, no markdown)
 - Safe buttons (<=20 chars)
 - AI thoughts/reasoning stripped from responses
+- Deduplication: each WhatsApp message ID processed ONCE only
+- Webhook always returns 200 instantly to stop WhatsApp retries
 """
 
 import os
 import re
+import time
 import logging
 import json
 import random
+import asyncio
 from fastapi import FastAPI, Request
 from dotenv import load_dotenv
 from google import genai
@@ -24,16 +28,39 @@ from concurrent.futures import ThreadPoolExecutor
 # ─────────────────────────────
 load_dotenv()
 
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+WHATSAPP_TOKEN    = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "fedecoach2024")
+GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY")
+VERIFY_TOKEN      = os.getenv("WHATSAPP_VERIFY_TOKEN", "fedecoach2024")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client   = genai.Client(api_key=GEMINI_API_KEY)
 executor = ThreadPoolExecutor(max_workers=5)
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
+
+# ─────────────────────────────
+# DEDUPLICATION CACHE
+#
+# WhatsApp retries the same webhook event when your server is slow (>5s).
+# We track every message ID we have already processed.
+# If the same ID arrives again we return 200 immediately and do nothing.
+# Cache entries expire after 10 minutes to avoid unbounded memory growth.
+# ─────────────────────────────
+PROCESSED_IDS: dict[str, float] = {}   # message_id -> timestamp
+DEDUP_TTL = 600  # seconds (10 minutes)
+
+def is_duplicate(msg_id: str) -> bool:
+    now = time.time()
+    # Expire old entries
+    expired = [k for k, ts in PROCESSED_IDS.items() if now - ts > DEDUP_TTL]
+    for k in expired:
+        del PROCESSED_IDS[k]
+    if msg_id in PROCESSED_IDS:
+        logging.info(f"DUPLICATE msg_id={msg_id} — ignored")
+        return True
+    PROCESSED_IDS[msg_id] = now
+    return False
 
 # ─────────────────────────────
 # MEMORY
@@ -41,17 +68,10 @@ logging.basicConfig(level=logging.INFO)
 USER_STATE = {}
 USER_LANG  = {}
 
-def set_state(user, state):
-    USER_STATE[user] = state
-
-def get_state(user):
-    return USER_STATE.get(user, "start")
-
-def set_lang(user, lang):
-    USER_LANG[user] = lang
-
-def get_lang(user):
-    return USER_LANG.get(user, "en")
+def set_state(user, state): USER_STATE[user] = state
+def get_state(user):        return USER_STATE.get(user, "start")
+def set_lang(user, lang):   USER_LANG[user] = lang
+def get_lang(user):         return USER_LANG.get(user, "en")
 
 # ─────────────────────────────
 # LANGUAGE DETECTION
@@ -60,28 +80,25 @@ SWAHILI_GREETINGS = [
     "habari", "jambo", "mambo", "karibu", "salamu", "hujambo",
     "niaje", "sasa", "nzuri", "shikamoo", "marahaba", "sijambo",
     "hamjambo", "mzuri", "poa", "safi", "habari yako",
-    "habari za asubuhi", "habari za mchana", "habari za jioni"
+    "habari za asubuhi", "habari za mchana", "habari za jioni",
 ]
-
 ENGLISH_GREETINGS = [
     "hello", "hi", "hey", "good morning", "good afternoon",
     "good evening", "greetings", "howdy", "what's up", "sup",
-    "good day", "morning", "evening", "afternoon", "hiya", "yo"
+    "good day", "morning", "evening", "afternoon", "hiya", "yo",
 ]
-
 SWAHILI_GOODBYES = [
     "asante", "asante sana", "kwa heri", "kwaheri", "baadaye",
     "tutaonana", "nakushukuru", "nashukuru", "nimekwisha",
     "nimemaliza", "ok asante", "sawa asante", "ahsante",
-    "sawa", "nimepata", "nimeelewa", "ok"
+    "sawa", "nimepata", "nimeelewa", "ok",
 ]
-
 ENGLISH_GOODBYES = [
     "thanks", "thank you", "thank you so much", "bye", "goodbye",
     "see you", "see ya", "later", "cheers", "ok thanks",
     "okay thanks", "noted thanks", "great thanks", "perfect thanks",
     "done", "ok bye", "that's all", "thats all", "no more",
-    "got it", "understood", "noted", "okay", "ok", "cool"
+    "got it", "understood", "noted", "okay", "ok", "cool",
 ]
 
 def detect_language(text: str):
@@ -97,34 +114,61 @@ def detect_language(text: str):
 def is_goodbye(text: str) -> bool:
     lower = text.lower().strip()
     for w in SWAHILI_GOODBYES + ENGLISH_GOODBYES:
-        if lower == w or lower == w + "!" or lower == w + ".":
+        if lower in (w, w + "!", w + "."):
             return True
     return False
 
+# ─────────────────────────────
+# GEMINI HELPER
+# Retries on 429; aborts on expired/invalid key or other permanent errors.
+# ─────────────────────────────
+async def _gemini_call(contents: str, system: str = None) -> str:
+    max_retries = 3
+    delay       = 5
+
+    for attempt in range(max_retries):
+        try:
+            loop = asyncio.get_event_loop()
+
+            def _call():
+                kwargs = {"model": "gemini-2.5-flash", "contents": contents}
+                if system:
+                    kwargs["config"] = {"system_instruction": system}
+                return client.models.generate_content(**kwargs).text
+
+            return await loop.run_in_executor(executor, _call)
+
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                if attempt < max_retries - 1:
+                    logging.warning(f"Gemini 429 attempt {attempt+1}/{max_retries}, retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                else:
+                    logging.error("Gemini 429 — all retries exhausted.")
+                    return None
+            else:
+                logging.error(f"Gemini error [{type(e).__name__}]: {e}")
+                return None
+
+    return None
+
+
 async def detect_language_ai(text: str) -> str:
-    try:
-        loop = __import__('asyncio').get_event_loop()
-
-        def call_api():
-            res = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=(
-                    "Is this message in Swahili or English? "
-                    "Reply with ONLY one word: 'sw' or 'en'. "
-                    f"Message: {text}"
-                ),
-            )
-            return res.text
-
-        detected = await loop.run_in_executor(executor, call_api)
-        detected = detected.strip().lower()
-        return "sw" if "sw" in detected else "en"
-    except Exception as e:
-        logging.warning(f"Language detection AI failed: {type(e).__name__}: {e}")
-        return "en"
+    result = await _gemini_call(
+        contents=(
+            "Is this message in Swahili or English? "
+            "Reply with ONLY one word: 'sw' or 'en'. "
+            f"Message: {text}"
+        )
+    )
+    if result:
+        return "sw" if "sw" in result.strip().lower() else "en"
+    return "en"
 
 # ─────────────────────────────
-# CLEAN TEXT
+# CLEAN TEXT + STRIP THOUGHTS
 # ─────────────────────────────
 def clean_text(text, max_len=1000):
     if not text:
@@ -133,25 +177,50 @@ def clean_text(text, max_len=1000):
         text = text.replace(ch, "")
     return text.strip()[:max_len]
 
-# ─────────────────────────────
-# STRIP AI THOUGHTS / REASONING
-# ─────────────────────────────
 def strip_thoughts(text: str) -> str:
-    """Remove any leaked reasoning blocks from the AI response."""
     if not text:
         return ""
-    # Remove <think>...</think> or <thinking>...</thinking> tags
     text = re.sub(r'<think(?:ing)?>.*?</think(?:ing)?>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    # Remove THOUGHTS: ... or THOUGHT: ... blocks (up to the next all-caps section or end)
     text = re.sub(r'THOUGHTS?:.*?(?=\n[A-Z]|\Z)', '', text, flags=re.DOTALL | re.IGNORECASE)
-    # Remove common reasoning lead-in lines
     text = re.sub(
         r'^(My |I need to|Let me|Okay,|Alright,|Sure,|Of course,|The user|Looking at).*\n?',
-        '',
-        text,
-        flags=re.MULTILINE | re.IGNORECASE
+        '', text, flags=re.MULTILINE | re.IGNORECASE
     )
     return text.strip()
+
+# ─────────────────────────────
+# AI FALLBACK
+# ─────────────────────────────
+SYSTEM_PROMPT_SW = (
+    "Wewe ni msaidizi wa MBEYA SACCO kwenye WhatsApp. "
+    "Jibu kwa Kiswahili tu. Majibu mafupi na wazi. "
+    "Hakuna markdown, hakuna *, hakuna alama za ziada. "
+    "Hakuna mawazo, hakuna maelezo ya ndani, hakuna THOUGHTS, hakuna sababu. "
+    "Toa JIBU TU moja kwa moja bila utangulizi wowote. "
+    "Huduma: Akiba (TZS 10,000), Mikopo (TZS 50,000-5,000,000), Uwekezaji. "
+    "Kama swali halikuhusiani na SACCO jibu: Samahani, ninatoa taarifa za MBEYA SACCO tu."
+)
+SYSTEM_PROMPT_EN = (
+    "You are a MBEYA SACCO WhatsApp assistant. "
+    "Reply in English only. Keep replies short and clear. "
+    "No markdown, no *, no symbols. "
+    "No thoughts, no reasoning, no THOUGHTS blocks, no preamble of any kind. "
+    "Output ONLY the final answer directly, nothing else. "
+    "Services: Savings (from TZS 10,000), Loans (TZS 50,000-5,000,000), Investments. "
+    "If unrelated to SACCO reply: Sorry, I only provide information about MBEYA SACCO services."
+)
+
+async def ask_ai(user: str, msg: str) -> str:
+    lang   = get_lang(user)
+    system = SYSTEM_PROMPT_SW if lang == "sw" else SYSTEM_PROMPT_EN
+    result = await _gemini_call(contents=msg, system=system)
+    if result:
+        return clean_text(strip_thoughts(result))
+    return (
+        "Samahani, huduma ya maswali haipo sasa hivi. Tafadhali wasiliana nasi moja kwa moja."
+        if lang == "sw" else
+        "Sorry, the Q&A service is temporarily unavailable. Please contact us directly."
+    )
 
 # ─────────────────────────────
 # STATIC CONTENT
@@ -289,7 +358,7 @@ CONTENT = {
             "na wewe umeshafanya hivyo. MBEYA SACCO inakuamini na inakusaidia. Kwa heri!",
 
             "Kwa heri na safari njema! Usisahau: akiba ndogo ya kila siku "
-            "inakuwa utajiri mkubwa kesho. MBEYA SACCO itakuwa hapa ukihitaji msaada wowote!"
+            "inakuwa utajiri mkubwa kesho. MBEYA SACCO itakuwa hapa ukihitaji msaada wowote!",
         ],
     },
     "en": {
@@ -425,9 +494,9 @@ CONTENT = {
             "begun and we are proud to be part of it. Come back any time. Goodbye!",
 
             "Goodbye and stay well! Small savings every day add up to big wealth "
-            "tomorrow. MBEYA SACCO looks forward to serving you again very soon!"
+            "tomorrow. MBEYA SACCO looks forward to serving you again very soon!",
         ],
-    }
+    },
 }
 
 BUTTONS = {
@@ -442,31 +511,21 @@ BUTTONS = {
         "services": [("savings", "Savings"), ("loans", "Loans"), ("invest", "Investments")],
         "help":     [("faqs", "FAQs"), ("tips", "Financial Tips")],
         "contact":  [("send_msg", "Send Message")],
-    }
+    },
 }
 
-def get_content(user, key):
-    lang = get_lang(user)
-    return CONTENT[lang].get(key, "")
-
-def get_buttons(user, menu):
-    lang = get_lang(user)
-    return BUTTONS[lang].get(menu, [])
-
+def get_content(user, key):  return CONTENT[get_lang(user)].get(key, "")
+def get_buttons(user, menu): return BUTTONS[get_lang(user)].get(menu, [])
 def get_goodbye(user) -> str:
-    lang = get_lang(user)
-    messages = CONTENT[lang].get("goodbye", [])
-    return random.choice(messages) if messages else "Goodbye!"
+    msgs = CONTENT[get_lang(user)].get("goodbye", [])
+    return random.choice(msgs) if msgs else "Goodbye!"
 
 # ─────────────────────────────
 # SEND HELPERS
 # ─────────────────────────────
-async def send_request(payload):
-    url = f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json"
-    }
+async def _send(payload: dict):
+    url     = f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_ID}/messages"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     logging.info(f"PAYLOAD: {json.dumps(payload)}")
     async with httpx.AsyncClient() as c:
         res = await c.post(url, headers=headers, json=payload)
@@ -474,41 +533,37 @@ async def send_request(payload):
             logging.warning(f"WA API ERROR {res.status_code}: {res.text}")
         else:
             logging.info(f"STATUS: {res.status_code}")
-        return res
 
-async def send_text(to, text):
-    payload = {
+async def send_text(to: str, text: str):
+    await _send({
         "messaging_product": "whatsapp",
         "to": to,
         "type": "text",
-        "text": {"body": clean_text(text)}
-    }
-    await send_request(payload)
+        "text": {"body": clean_text(text)},
+    })
 
-async def send_buttons(to, text, buttons):
+async def send_buttons(to: str, text: str, buttons: list):
     text = clean_text(text, max_len=1024)
-    safe = []
-    for b in buttons:
-        title = clean_text(b[1])[:20]
-        if title:
-            safe.append({"type": "reply", "reply": {"id": b[0], "title": title}})
+    safe = [
+        {"type": "reply", "reply": {"id": b[0], "title": clean_text(b[1])[:20]}}
+        for b in buttons if clean_text(b[1])
+    ]
     if not safe:
         await send_text(to, text)
         return
-    payload = {
+    await _send({
         "messaging_product": "whatsapp",
         "to": to,
         "type": "interactive",
         "interactive": {
             "type": "button",
             "body": {"text": text},
-            "action": {"buttons": safe[:3]}
-        }
-    }
-    await send_request(payload)
+            "action": {"buttons": safe[:3]},
+        },
+    })
 
 # ─────────────────────────────
-# MENUS
+# MENUS  (each sends EXACTLY ONE message)
 # ─────────────────────────────
 async def main_menu(user):
     await send_buttons(user, get_content(user, "welcome"), get_buttons(user, "main"))
@@ -527,196 +582,151 @@ async def contact_menu(user):
     set_state(user, "contact")
 
 # ─────────────────────────────
-# AI FALLBACK
+# PROCESS MESSAGE (runs in background after 200 is returned)
 # ─────────────────────────────
-SYSTEM_PROMPT_SW = (
-    "Wewe ni msaidizi wa MBEYA SACCO kwenye WhatsApp. "
-    "Jibu kwa Kiswahili tu. Majibu mafupi na wazi. "
-    "Hakuna markdown, hakuna *, hakuna alama za ziada. "
-    "Hakuna mawazo, hakuna maelezo ya ndani, hakuna THOUGHTS, hakuna sababu. "
-    "Toa JIBU TU moja kwa moja bila utangulizi wowote. "
-    "Huduma: Akiba (TZS 10,000), Mikopo (TZS 50,000-5,000,000), Uwekezaji. "
-    "Kama swali halikuhusiani na SACCO jibu: "
-    "Samahani, ninatoa taarifa za MBEYA SACCO tu."
-)
+async def process_message(sender: str, text: str, is_button: bool):
+    state = get_state(sender)
 
-SYSTEM_PROMPT_EN = (
-    "You are a MBEYA SACCO WhatsApp assistant. "
-    "Reply in English only. Keep replies short and clear. "
-    "No markdown, no *, no symbols. "
-    "No thoughts, no reasoning, no THOUGHTS blocks, no preamble of any kind. "
-    "Output ONLY the final answer directly, nothing else. "
-    "Services: Savings (from TZS 10,000), Loans (TZS 50,000-5,000,000), Investments. "
-    "If unrelated to SACCO reply: "
-    "Sorry, I only provide information about MBEYA SACCO services."
-)
+    # ── Language detection ───────────────────────────────────────────
+    if not is_button:
+        if state == "start" or sender not in USER_LANG:
+            detected = detect_language(text)
+            if detected is None:
+                detected = await detect_language_ai(text)
+            set_lang(sender, detected)
+            logging.info(f"Language set for {sender}: {detected}")
+        else:
+            detected = detect_language(text)
+            if detected:
+                set_lang(sender, detected)
 
-async def ask_ai(user, msg):
-    lang = get_lang(user)
-    system = SYSTEM_PROMPT_SW if lang == "sw" else SYSTEM_PROMPT_EN
-    try:
-        loop = __import__('asyncio').get_event_loop()
+    # ── Goodbye — ONE warm farewell, reset state ─────────────────────
+    if not is_button and is_goodbye(text):
+        await send_text(sender, get_goodbye(sender))
+        set_state(sender, "start")
+        return
 
-        def call_api():
-            res = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=msg,
-                config={"system_instruction": system}
-            )
-            return res.text
+    # ── Routing — every branch sends EXACTLY ONE message ────────────
+    if state == "start":
+        await main_menu(sender)
 
-        result = await loop.run_in_executor(executor, call_api)
-        return clean_text(strip_thoughts(result))
-    except Exception as e:
-        logging.error(f"AI error: {type(e).__name__}: {e}")
-        return (
-            "Tafadhali jaribu tena baadaye."
-            if lang == "sw"
-            else "Please try again later."
-        )
+    elif text == "services":
+        await services_menu(sender)
+
+    elif text == "help":
+        await help_menu(sender)
+
+    elif text == "contact":
+        await contact_menu(sender)
+
+    elif text == "savings":
+        await send_text(sender, get_content(sender, "savings"))
+
+    elif text == "loans":
+        await send_text(sender, get_content(sender, "loans"))
+
+    elif text == "invest":
+        await send_text(sender, get_content(sender, "invest"))
+
+    elif text == "faqs":
+        await send_text(sender, get_content(sender, "faqs"))
+
+    elif text == "tips":
+        await send_text(sender, get_content(sender, "tips"))
+
+    elif text == "send_msg":
+        set_state(sender, "contact_input")
+        await send_text(sender, get_content(sender, "write_msg"))
+
+    elif state == "contact_input":
+        logging.info(f"ADMIN MSG from {sender}: {text}")
+        await send_text(sender, get_content(sender, "msg_received"))
+        set_state(sender, "main")
+
+    else:
+        reply = await ask_ai(sender, text)
+        await send_text(sender, reply)
+
 
 # ─────────────────────────────
 # WEBHOOK
 # ─────────────────────────────
 @app.post("/api/webhook")
 async def webhook(req: Request):
+    """
+    Return 200 immediately, then process the message in the background.
+    This prevents WhatsApp from timing out and resending the same event.
+    The deduplication cache ensures that even if WhatsApp sends the event
+    twice before our background task records the ID, we process it only once.
+    """
     body = await req.json()
 
     try:
-        # Handle malformed webhook data
-        try:
-            msg = body["entry"][0]["changes"][0]["value"]["messages"][0]
-        except (KeyError, IndexError, TypeError) as e:
-            logging.debug(f"Webhook structure error: {e}, body: {body}")
+        # ── Safe extraction — ignore status/read-receipt events ──────
+        entry = body.get("entry")
+        if not entry:
             return {"status": "ok"}
 
+        value = entry[0].get("changes", [{}])[0].get("value", {})
+
+        if "messages" not in value:
+            return {"status": "ok"}
+
+        messages_list = value["messages"]
+        if not messages_list:
+            return {"status": "ok"}
+
+        msg    = messages_list[0]
         sender = msg.get("from")
+        msg_id = msg.get("id", "")
+
         if not sender:
-            logging.warning(f"No sender in message: {msg}")
             return {"status": "ok"}
 
+        # ── DEDUPLICATION — ignore retries of already-processed events
+        if msg_id and is_duplicate(msg_id):
+            return {"status": "ok"}
+
+        # ── Parse text ───────────────────────────────────────────────
         if msg.get("type") == "interactive":
-            text = msg["interactive"]["button_reply"]["id"]
+            text      = msg["interactive"]["button_reply"]["id"]
             is_button = True
         else:
-            text = msg.get("text", {}).get("body", "").strip()
+            text      = msg.get("text", {}).get("body", "").strip()
             is_button = False
 
-        state = get_state(sender)
-
-        # ── Language detection ──
-        if not is_button:
-            if state == "start" or sender not in USER_LANG:
-                detected = detect_language(text)
-                if detected is None:
-                    detected = await detect_language_ai(text)
-                set_lang(sender, detected)
-                logging.info(f"Language set for {sender}: {detected}")
-            else:
-                detected = detect_language(text)
-                if detected:
-                    set_lang(sender, detected)
-
-        # ── Goodbye — send warm farewell, no buttons, reset state ──
-        if not is_button and is_goodbye(text):
-            await send_text(sender, get_goodbye(sender))
-            set_state(sender, "start")
+        if not text:
             return {"status": "ok"}
 
-        # ── Routing ──
-
-        if state == "start":
-            await main_menu(sender)
-
-        # Top-level menu
-        elif text == "services":
-            await services_menu(sender)
-
-        elif text == "help":
-            await help_menu(sender)
-
-        elif text == "contact":
-            await contact_menu(sender)
-
-        # Services — return ONLY the button's own content, nothing else
-        elif text == "savings":
-            await send_text(sender, get_content(sender, "savings"))
-
-        elif text == "loans":
-            await send_text(sender, get_content(sender, "loans"))
-
-        elif text == "invest":
-            await send_text(sender, get_content(sender, "invest"))
-
-        # Help — return ONLY the button's own content, nothing else
-        elif text == "faqs":
-            await send_text(sender, get_content(sender, "faqs"))
-
-        elif text == "tips":
-            await send_text(sender, get_content(sender, "tips"))
-
-        # Contact flow
-        elif text == "send_msg":
-            set_state(sender, "contact_input")
-            await send_text(sender, get_content(sender, "write_msg"))
-
-        elif state == "contact_input":
-            logging.info(f"ADMIN MSG from {sender}: {text}")
-            await send_text(sender, get_content(sender, "msg_received"))
-            await main_menu(sender)
-
-        # Free text → AI fallback
-        else:
-            reply = await ask_ai(sender, text)
-            await send_text(sender, reply)
-
-        return {"status": "ok"}
+        # ── Fire-and-forget: process in background, return 200 now ───
+        asyncio.create_task(process_message(sender, text, is_button))
 
     except Exception as e:
-        logging.error(f"Webhook error: {type(e).__name__}: {e}", exc_info=True)
-        return {"status": "ok"}
+        logging.error(f"Webhook parse error: {e}", exc_info=True)
+
+    # Always return 200 immediately — this stops WhatsApp from retrying
+    return {"status": "ok"}
 
 
+# ─────────────────────────────
+# VERIFICATION + HEALTH
+# ─────────────────────────────
 @app.get("/api/webhook")
 async def verify_webhook(req: Request):
-    params = req.query_params
-    mode      = params.get("hub.mode")
-    token     = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
-    verify_token = os.getenv("WHATSAPP_VERIFY_TOKEN", "fedecoach2024")
-    if mode == "subscribe" and token == verify_token:
-        return int(challenge)
+    p = req.query_params
+    if p.get("hub.mode") == "subscribe" and p.get("hub.verify_token") == VERIFY_TOKEN:
+        return int(p.get("hub.challenge"))
     return {"error": "Verification failed"}
-
-
-@app.get("/api/health")
-async def health_check():
-    """Test Gemini API connectivity"""
-    try:
-        loop = __import__('asyncio').get_event_loop()
-
-        def call_api():
-            res = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents="Say 'OK' only"
-            )
-            return res.text
-
-        result = await loop.run_in_executor(executor, call_api)
-        return {
-            "status": "ok",
-            "gemini_api": "working",
-            "response": result.strip()
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "gemini_api": "failed",
-            "error": str(e),
-            "error_type": type(e).__name__
-        }
 
 
 @app.get("/")
 def home():
     return {"status": "MBEYA SACCO BOT RUNNING"}
+
+
+@app.get("/api/health")
+async def health_check():
+    result = await _gemini_call("Say 'OK' only")
+    if result:
+        return {"status": "ok", "gemini_api": "working", "response": result.strip()}
+    return {"status": "degraded", "gemini_api": "unavailable - check API key or quota"}
