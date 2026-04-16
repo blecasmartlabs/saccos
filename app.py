@@ -118,6 +118,31 @@ def is_goodbye(text: str) -> bool:
     return False
 
 # ─────────────────────────────
+# SACCOS DEFINITION DETECTION
+# ─────────────────────────────
+SACCOS_KEYWORDS_SW = [
+    "sacco", "nini sacco", "sacco ni nini", "je sacco", "SACCO",
+    "savings and credit", "akiba na mikopo", "kooperetiva", "cooperative",
+    "cumulative savings", "habari kuhusu sacco", "somo la sacco",
+    "SACCOS ni nini", "SACCOS"
+]
+SACCOS_KEYWORDS_EN = [
+    "what is sacco", "what is saccos", "sacco definition", "saccos definition",
+    "tell me about sacco", "tell me about saccos", "SACCO", "SACCOS",
+    "savings and credit", "explain sacco", "sacco meaning", "saccos meaning",
+    "cooperative society", "cooperative"
+]
+
+def is_sacco_definition_question(text: str, lang: str) -> bool:
+    """Check if user is asking about what SACCO/SACCOS is"""
+    lower = text.lower().strip()
+    keywords = SACCO_KEYWORDS_SW if lang == "sw" else SACCO_KEYWORDS_EN
+    for keyword in keywords:
+        if keyword in lower:
+            return True
+    return False
+
+# ─────────────────────────────
 # GEMINI HELPER
 # Retries on 429; aborts on expired/invalid key or other permanent errors.
 # ─────────────────────────────
@@ -209,12 +234,33 @@ SYSTEM_PROMPT_EN = (
     "If unrelated to SACCO reply: Sorry, I only provide information about MBEYA SACCO services."
 )
 
-async def ask_ai(user: str, msg: str) -> str:
-    lang   = get_lang(user)
-    system = SYSTEM_PROMPT_SW if lang == "sw" else SYSTEM_PROMPT_EN
+SYSTEM_PROMPT_SACCO_EDU_SW = (
+    "Wewe ni mtaalam wa SACCO kwenye WhatsApp. "
+    "Jibu kwa Kiswahili tu. Eleza SACCO kwa namna kamili na muhimu. "
+    "Andika kuhusu: (1) SACCO ni nini, (2) historia, (3) faida, (4) huduma, (5) jinsi ya kujiunga. "
+    "Hakuna markdown, hakuna *, hakuna alama za ziada. "
+    "Hakuna mawazo, hakuna maelezo ya ndani. Toa JIBU KAMILI na muhimu TU. "
+    "FOCUS: SACCO only - Savings and Credit Cooperative Organisation."
+)
+SYSTEM_PROMPT_SACCO_EDU_EN = (
+    "You are a SACCO expert on WhatsApp. "
+    "Reply in English only. Explain SACCO comprehensively and thoroughly. "
+    "Cover: (1) What is SACCO, (2) History, (3) Benefits, (4) Services, (5) How to join. "
+    "No markdown, no *, no symbols. "
+    "No thoughts, no reasoning. Provide COMPLETE and THOROUGH information ONLY. "
+    "FOCUS: SACCO only - Savings and Credit Cooperative Organisation. "
+    "Answer ALL questions about SACCO in detail and with authority."
+)
+
+async def ask_ai(user: str, msg: str, is_sacco_edu: bool = False) -> str:
+    lang = get_lang(user)
+    if is_sacco_edu:
+        system = SYSTEM_PROMPT_SACCO_EDU_SW if lang == "sw" else SYSTEM_PROMPT_SACCO_EDU_EN
+    else:
+        system = SYSTEM_PROMPT_SW if lang == "sw" else SYSTEM_PROMPT_EN
     result = await _gemini_call(contents=msg, system=system)
     if result:
-        return clean_text(strip_thoughts(result))
+        return clean_text(strip_thoughts(result), max_len=4096)
     return (
         "Samahani, huduma ya maswali haipo sasa hivi. Tafadhali wasiliana nasi moja kwa moja."
         if lang == "sw" else
@@ -616,6 +662,12 @@ async def process_message(sender: str, text: str, is_button: bool):
         logging.info(f"ADMIN MSG from {sender}: {text}")
         await send_text(sender, get_content(sender, "msg_received"))
         set_state(sender, "main")
+        return
+
+    # ── SACCO Definition Question → AI with special system prompt ───────
+    if is_sacco_definition_question(text, get_lang(sender)):
+        reply = await ask_ai(sender, text, is_sacco_edu=True)
+        await send_text(sender, reply)
         return
 
     # ── Button / menu routing (works from ANY state) ─────────────────
